@@ -1,329 +1,691 @@
-import tkinter as tk
-import tkinter.font as tkfont
-from tkinter import messagebox, ttk
+from __future__ import annotations
 
-from motor_inferencia import Nodo, Parser, Tableau, fstr, hojas, es_lit
+import argparse
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass, field
+from typing import Iterator, Optional, Union
 
-CONECTORES = {"a": "Atómica", "n": "Negación", "and": "Conjunción",
-              "or": "Disyunción", "imp": "Condicional", "iff": "Bicondicional"}
-AZUL, ROJO, VERDE, GRIS = "#4b5fd6", "#c62828", "#1b8a4b", "#777777"
+sys.setrecursionlimit(20000)
 
-
-def ocurrencias(f, dentro=False, acc=None):
-    """Lista (letra, nº de negaciones directas, dentro_de_negación_mayor) en orden de aparición."""
-    acc = [] if acc is None else acc
-    if f[0] == "a":
-        acc.append((f[1], 0, dentro))
-    elif f[0] == "n":
-        k, g = 0, f
-        while g[0] == "n":
-            k, g = k + 1, g[1]
-        if g[0] == "a":
-            acc.append((g[1], k, dentro))
-        else:
-            ocurrencias(g, True, acc)
-    else:
-        ocurrencias(f[1], dentro, acc)
-        ocurrencias(f[2], dentro, acc)
-    return acc
+# =============================================================================
+#  1. FÓRMULAS
+# =============================================================================
+Y, O, IMP, IFF = "∧", "∨", "→", "↔"
 
 
-def estado(letra, k):
-    if k == 0:
-        return "afirmada"
-    if k % 2 == 1:
-        return f"NEGADA ({'¬' * k}{letra})" if k == 1 else f"NEGADA, {k} negaciones ({'¬' * k}{letra})"
-    return f"doble negación ({'¬' * k}{letra}), equivale a afirmada"
+@dataclass(frozen=True)
+class Atom:
+    nombre: str
 
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Motor de inferencia · Árboles semánticos")
-        self.geometry("1320x780")
-        self.minsize(960, 600)
-        self.textos, self.reglas, self.P = [], [], Parser()
-        self.raiz, self.escala = None, 1.0
-        self._interfaz()
+@dataclass(frozen=True)
+class Neg:
+    sub: "Formula"
 
-    # ------------------------------------------------------------ interfaz
-    def _interfaz(self):
-        panel = ttk.PanedWindow(self, orient="horizontal")
-        panel.pack(fill="both", expand=True)
-        izq, der = ttk.Frame(panel, padding=8), ttk.Frame(panel)
-        panel.add(izq, weight=0)
-        panel.add(der, weight=1)
 
-        ttk.Label(izq, text="Escribe reglas y hechos en español (uno por línea):",
-                  font=("Helvetica", 10, "bold")).pack(anchor="w")
-        self.entrada = tk.Text(izq, height=5, width=48, wrap="word", font=("Helvetica", 11))
-        self.entrada.pack(fill="x", pady=4)
-        self.entrada.bind("<Control-Return>", lambda e: (self.agregar(), "break")[1])
-        fila = ttk.Frame(izq)
-        fila.pack(fill="x")
-        ttk.Button(fila, text="➕ Agregar (Ctrl+Enter)", command=self.agregar).pack(side="left")
-        ttk.Button(fila, text="Limpiar todo", command=self.limpiar).pack(side="left", padx=6)
+@dataclass(frozen=True)
+class Bin:
+    op: str
+    izq: "Formula"
+    der: "Formula"
 
-        ttk.Label(izq, text="Reglas y fórmulas", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(10, 0))
-        self.tr = ttk.Treeview(izq, columns=("id", "conector", "formula", "texto"), show="headings", height=7)
-        for c, t, w in (("id", "ID", 34), ("conector", "Conector", 88), ("formula", "Fórmula", 110), ("texto", "Texto original", 170)):
-            self.tr.heading(c, text=t)
-            self.tr.column(c, width=w, anchor="w")
-        self.tr.pack(fill="x")
-        ttk.Button(izq, text="Quitar regla seleccionada", command=self.quitar).pack(anchor="w", pady=3)
 
-        ttk.Label(izq, text="Tabla de átomos", font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(6, 0))
-        self.ta = ttk.Treeview(izq, columns=("l", "s"), show="headings", height=5)
-        self.ta.heading("l", text="Letra")
-        self.ta.heading("s", text="Significado")
-        self.ta.column("l", width=50)
-        self.ta.column("s", width=340)
-        self.ta.pack(fill="x")
+Formula = Union[Atom, Neg, Bin]
 
-        ttk.Button(izq, text="🌳  Construir grafo (árbol semántico)",
-                   command=self.construir).pack(fill="x", pady=10, ipady=6)
-        self.res = tk.Text(izq, height=9, wrap="word", state="disabled", font=("Helvetica", 10))
-        self.res.tag_configure("ok", foreground=VERDE)
-        self.res.tag_configure("mal", foreground=ROJO)
-        self.res.tag_configure("b", font=("Helvetica", 10, "bold"))
-        self.res.pack(fill="both", expand=True)
 
-        self.nb = ttk.Notebook(der)
-        self.nb.pack(fill="both", expand=True)
-        tab_grafo, tab_an = ttk.Frame(self.nb), ttk.Frame(self.nb)
-        self.nb.add(tab_grafo, text="🌳 Grafo")
-        self.nb.add(tab_an, text="📋 Análisis de cada regla")
-        self.an = tk.Text(tab_an, wrap="word", state="disabled", font=("Helvetica", 11), padx=10, pady=8)
-        san = ttk.Scrollbar(tab_an, command=self.an.yview)
-        self.an.configure(yscrollcommand=san.set)
-        san.pack(side="right", fill="y")
-        self.an.pack(fill="both", expand=True)
-        self.an.tag_configure("t", font=("Helvetica", 12, "bold"), foreground=AZUL, spacing1=10)
-        self.an.tag_configure("neg", foreground=ROJO, font=("Helvetica", 11, "bold"))
-        self.an.tag_configure("afi", foreground=VERDE, font=("Helvetica", 11, "bold"))
-        self.an.tag_configure("g", foreground=GRIS)
-        self.an.tag_configure("av", foreground="#b26a00", font=("Helvetica", 11, "bold"))
-        barra = ttk.Frame(tab_grafo, padding=4)
-        barra.pack(fill="x")
-        for t, f in (("🔍+", 1.2), ("🔍−", 1 / 1.2)):
-            ttk.Button(barra, text=t, width=5, command=lambda f=f: self.zoom(f)).pack(side="left")
-        ttk.Button(barra, text="100%", width=5, command=lambda: self.zoom(None)).pack(side="left", padx=2)
-        tk.Label(barra, text="  ▭ fórmula", fg=AZUL).pack(side="left")
-        tk.Label(barra, text="  ✕ rama cerrada", fg=ROJO).pack(side="left")
-        tk.Label(barra, text="  ○ rama abierta", fg=VERDE).pack(side="left")
-        tk.Label(barra, text="  ✓ ya desarrollada   (arrastra para mover)", fg=GRIS).pack(side="left")
+def es_literal(f: Formula) -> bool:
+    return isinstance(f, Atom) or (isinstance(f, Neg) and isinstance(f.sub, Atom))
 
-        marco = ttk.Frame(tab_grafo)
-        marco.pack(fill="both", expand=True)
-        self.lienzo = tk.Canvas(marco, bg="white", highlightthickness=0)
-        sy = ttk.Scrollbar(marco, orient="vertical", command=self.lienzo.yview)
-        sx = ttk.Scrollbar(marco, orient="horizontal", command=self.lienzo.xview)
-        self.lienzo.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
-        sy.pack(side="right", fill="y")
-        sx.pack(side="bottom", fill="x")
-        self.lienzo.pack(fill="both", expand=True)
-        self.lienzo.bind("<ButtonPress-1>", lambda e: self.lienzo.scan_mark(e.x, e.y))
-        self.lienzo.bind("<B1-Motion>", lambda e: self.lienzo.scan_dragto(e.x, e.y, gain=1))
-        self.lienzo.bind("<MouseWheel>", lambda e: self.lienzo.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-        self.lienzo.bind("<Button-4>", lambda e: self.lienzo.yview_scroll(-1, "units"))
-        self.lienzo.bind("<Button-5>", lambda e: self.lienzo.yview_scroll(1, "units"))
-        self.mensaje("Escribe tus reglas arriba y pulsa «Agregar».")
 
-    # ------------------------------------------------------------ base de conocimiento
-    def reconstruir(self, textos):
-        P = Parser()
-        reglas = [(t, P.parse(t)) for t in textos]
-        self.textos, self.reglas, self.P = list(textos), reglas, P
-        self.tr.delete(*self.tr.get_children())
-        for i, (t, f) in enumerate(reglas, 1):
-            self.tr.insert("", "end", values=(f"R{i}", CONECTORES[f[0]], fstr(f), t))
-        self.ta.delete(*self.ta.get_children())
-        for letra, txt in P.atomos:
-            self.ta.insert("", "end", values=(letra, txt))
-        self.raiz = None
-        self.lienzo.delete("all")
-        self.actualizar_analisis()
+def complementaria(lit: Formula) -> Formula:
+    return lit.sub if isinstance(lit, Neg) else Neg(lit)
 
-    def actualizar_analisis(self):
-        w = self.an
-        w.configure(state="normal")
-        w.delete("1.0", "end")
-        if not self.reglas:
-            w.insert("end", "Aún no hay reglas. Escríbelas a la izquierda y pulsa «Agregar».", "g")
-        occ = [ocurrencias(f) for _, f in self.reglas]
-        textos = dict(self.P.atomos)
-        for i, (t, f) in enumerate(self.reglas):
-            w.insert("end", f"R{i + 1} · {CONECTORES[f[0]]} · {fstr(f)}\n", "t")
-            w.insert("end", f"Texto original: {t}\n", "g")
-            idem = [j + 1 for j, (_, g) in enumerate(self.reglas) if j != i and g == f]
-            if idem:
-                w.insert("end", "⚠ ATENCIÓN: la fórmula es IDÉNTICA a la regla " +
-                         ", ".join(f"R{j}" for j in idem) + "\n", "av")
-            for n, (letra, k, dentro) in enumerate(occ[i], 1):
-                w.insert("end", f"  P{n}: «{textos[letra]}» → {letra}  ")
-                w.insert("end", estado(letra, k) + "\n", "afi" if k % 2 == 0 else "neg")
-                if dentro:
-                    w.insert("end", "      (está dentro de una negación sobre una fórmula compuesta)\n", "g")
-                otras = []
-                for j, lista in enumerate(occ):
-                    if j == i:
-                        continue
-                    for (l2, k2, _) in lista:
-                        if l2 == letra:
-                            igual = (k2 % 2) == (k % 2)
-                            otras.append((j + 1, igual, k2))
-                            break
-                if not otras:
-                    w.insert("end", "      · aparece solo en esta regla\n", "g")
-                for j, igual, k2 in otras:
-                    if igual:
-                        w.insert("end", f"      = igual a la proposición de R{j} ({estado(letra, k2)})\n", "g")
-                    else:
-                        w.insert("end", f"      ~ mismo enunciado que en R{j}, pero con NEGACIÓN OPUESTA ({estado(letra, k2)})\n", "av")
-        w.configure(state="disabled")
 
-    def agregar(self):
-        lineas = [l.strip() for l in self.entrada.get("1.0", "end").splitlines() if l.strip()]
-        if not lineas:
-            return
-        anteriores = list(self.textos)
-        try:
-            self.reconstruir(anteriores + lineas)
-        except Exception as err:
-            self.reconstruir(anteriores)
-            messagebox.showerror("No pude interpretar el texto", str(err))
-            return
-        self.entrada.delete("1.0", "end")
-        n = len(anteriores)
-        info = [f"R{n + i}: {fstr(self.reglas[n + i - 1][1])}" for i in range(1, len(lineas) + 1)]
-        self.mensaje("Agregadas:\n" + "\n".join(info))
-        self.nb.select(1)
+def mostrar(f: Formula) -> str:
+    """Fórmula → texto, con paréntesis solo donde hacen falta."""
+    if isinstance(f, Atom):
+        return f.nombre
+    if isinstance(f, Neg):
+        interior = mostrar(f.sub)
+        return "¬" + (interior if isinstance(f.sub, (Atom, Neg)) else f"({interior})")
 
-    def quitar(self):
-        sel = self.tr.selection()
-        if not sel:
-            return
-        i = self.tr.index(sel[0])
-        self.reconstruir(self.textos[:i] + self.textos[i + 1:])
-        self.mensaje(f"Regla R{i + 1} eliminada; se renumeraron átomos y reglas.")
+    def lado(h: Formula) -> str:
+        s = mostrar(h)
+        if isinstance(h, Bin) and not (h.op == f.op and f.op in (Y, O)):
+            return f"({s})"
+        return s
 
-    def limpiar(self):
-        self.reconstruir([])
-        self.mensaje("Base de conocimiento vacía.")
+    return f"{lado(f.izq)} {f.op} {lado(f.der)}"
 
-    def mensaje(self, txt, tag=None):
-        self.res.configure(state="normal")
-        self.res.delete("1.0", "end")
-        self.res.insert("end", txt, tag or ())
-        self.res.configure(state="disabled")
 
-    # ------------------------------------------------------------ árbol semántico
-    def construir(self):
-        if not self.reglas:
-            messagebox.showinfo("Sin reglas", "Primero agrega al menos una regla o hecho.")
-            return
-        T, raiz, pend, lits = Tableau(), Nodo(), [], {}
-        for i, (_, f) in enumerate(self.reglas, 1):
-            T.agregar(raiz, f, f"R{i}", pend, lits)
-        T.correr(raiz, pend, lits)
-        self.raiz, self.escala = raiz, 1.0
-        self.nb.select(0)
-        self.update_idletasks()
-        self.dibujar()
-        self.resultado(raiz)
+# =============================================================================
+#  2. LENGUAJE NATURAL → ÁTOMOS Y FÓRMULAS
+# =============================================================================
+class ErrorFrase(ValueError):
+    """Frase que el traductor no logra interpretar."""
 
-    def resultado(self, raiz):
-        hs = hojas(raiz)
-        abiertas = [h for h in hs if h.abierta is not None]
-        self.res.configure(state="normal")
-        self.res.delete("1.0", "end")
-        self.res.insert("end", f"Ramas cerradas: {len(hs) - len(abiertas)} · abiertas: {len(abiertas)}\n\n", "b")
-        if not abiertas:
-            self.res.insert("end", "Todas las ramas se cierran: la base de conocimiento es "
-                                   "INSATISFACIBLE (inconsistente).", "mal")
-        else:
-            self.res.insert("end", "Base satisfacible. Condiciones en que todas las reglas se cumplen:\n", "ok")
-            for h in abiertas:
-                asign, libres = [], []
-                for letra, _ in self.P.atomos:
-                    if letra in h.abierta:
-                        asign.append(f"{letra} = V")
-                    elif "¬" + letra in h.abierta:
-                        asign.append(f"{letra} = F")
-                    else:
-                        libres.append(letra)
-                extra = f"   ({', '.join(libres)}: cualquier valor)" if libres else ""
-                self.res.insert("end", f"  ({', '.join(asign)}){extra}\n", "b")
-        self.res.configure(state="disabled")
 
-    def zoom(self, f):
-        self.escala = 1.0 if f is None else max(0.4, min(2.5, self.escala * f))
-        if self.raiz:
-            self.dibujar()
+LETRAS = list("PQRSTUVWXYZABCDEFGHIJKLMNO")
 
-    # ------------------------------------------------------------ dibujo del grafo
-    def texto(self, e):
-        return f"{e['id']}. {fstr(e['f'])}{'  ✓' if e['ap'] else ''}   [{e['src']}]"
 
-    def medir(self, n):
-        s = self.escala
-        n.anchos = [self.fuente.measure(self.texto(e)) + int(28 * s) for e in n.items]
-        n.marca = None
-        if n.cerrada:
-            n.marca = (n.motivo.split(" (")[0], "c")
-        elif n.abierta is not None:
-            n.marca = ("○  rama abierta", "o")
-        mw = self.fuente.measure(n.marca[0]) + int(28 * s) if n.marca else 0
-        n.propio = max(n.anchos + [mw])
-        for k in n.hijos:
-            self.medir(k)
-        hijos = sum(k.total for k in n.hijos) + self.sep * max(0, len(n.hijos) - 1)
-        n.total = max(n.propio, hijos)
+def _sin_acentos(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s)
+                   if unicodedata.category(c) != "Mn")
 
-    def dibujar(self):
-        s = self.escala
-        self.fuente = tkfont.Font(family="Helvetica", size=max(6, int(11 * s)))
-        self.alto, self.hueco, self.sep = int(34 * s), int(26 * s), int(24 * s)
-        self.lienzo.delete("all")
-        self.medir(self.raiz)
-        self._nodo(self.raiz, self.raiz.total / 2 + 40, 30, None)
-        x0, y0, x1, y1 = self.lienzo.bbox("all")
-        self.lienzo.configure(scrollregion=(x0 - 30, y0 - 30, x1 + 30, y1 + 30))
-        self.lienzo.xview_moveto(0)
-        self.lienzo.yview_moveto(0)
 
-    def _flecha(self, a, b):
-        self.lienzo.create_line(a[0], a[1], b[0], b[1], arrow="last", fill=GRIS, width=2)
+RE_IFF = re.compile(r",?\s+si y solo si\s+")
+RE_NEG_TOTAL = re.compile(
+    r"^(?:no es (?:verdad|cierto) que|es (?:falso|mentira) que|"
+    r"no ocurre que|no es el caso que)\s+(.+)$")
+RE_ENTONCES = re.compile(r",?\s+entonces\s+")
+RE_SOLO_SI = re.compile(r",?\s+solo si\s+")
+RE_SI_POSPUESTO = re.compile(r",?\s+si\s+")
+RE_DISYUNCION = re.compile(r",?\s+(?:o|u)\s+")
+RE_CONJUNCION = re.compile(r",?\s+(?:y|e|pero)\s+")
+RE_PREFIJO_ATOMO = re.compile(r"^(?:es verdad que|es cierto que|ocurre que)\s+")
 
-    def _caja(self, cx, y, w, txt, relleno, borde, color):
-        self.lienzo.create_rectangle(cx - w / 2, y, cx + w / 2, y + self.alto,
-                                     fill=relleno, outline=borde, width=2)
-        self.lienzo.create_text(cx, y + self.alto / 2, text=txt, font=self.fuente, fill=color)
 
-    def _nodo(self, n, cx, y, desde):
-        previo = desde
-        for e, w in zip(n.items, n.anchos):
-            if previo:
-                self._flecha(previo, (cx, y))
-            lit = es_lit(e["f"])
-            self._caja(cx, y, w, self.texto(e), "#ffffff" if lit else "#eef2ff", AZUL, "#111111")
-            previo = (cx, y + self.alto)
-            y += self.alto + self.hueco
-        if n.marca:
-            txt, tipo = n.marca
-            w = self.fuente.measure(txt) + int(28 * self.escala)
-            self._flecha(previo, (cx, y))
-            if tipo == "c":
-                self._caja(cx, y, w, txt, "#fde8e6", ROJO, ROJO)
+class Traductor:
+    """Extrae los átomos y convierte cada frase en una fórmula."""
+
+    def __init__(self) -> None:
+        self._por_clave: dict[str, str] = {}   # frase normalizada → letra
+        self.atomos: dict[str, str] = {}       # letra → frase original
+
+    # -- preparación del texto -------------------------------------------------
+    @staticmethod
+    def _limpiar(frase: str) -> str:
+        t = unicodedata.normalize("NFC", frase).lower().replace("sólo", "solo")
+        t = re.sub(r"[¿?¡!\"“”«»().:]", " ", t)
+        return re.sub(r"\s+", " ", t).strip()
+
+    def _letra(self, n: int) -> str:
+        return LETRAS[n] if n < len(LETRAS) else f"P{n - len(LETRAS) + 1}"
+
+    # -- átomos ---------------------------------------------------------------
+    def _atomo(self, t: str) -> Atom:
+        t = RE_PREFIJO_ATOMO.sub("", t)
+        t = re.sub(r"\s+", " ", t.replace(",", " ")).strip()
+        if not t:
+            raise ErrorFrase("hay una proposición vacía")
+        clave = _sin_acentos(t)
+        if clave not in self._por_clave:
+            letra = self._letra(len(self._por_clave))
+            self._por_clave[clave] = letra
+            self.atomos[letra] = t
+        return Atom(self._por_clave[clave])
+
+    # -- conectores (de menor a mayor precedencia) ------------------------------
+    @staticmethod
+    def _plegar(op: str, trozos: list, f) -> Formula:
+        res = f(trozos[0])
+        for t in trozos[1:]:
+            res = Bin(op, res, f(t))
+        return res
+
+    def _formula(self, t: str) -> Formula:
+        t = t.strip(" ,")
+        if not t:
+            raise ErrorFrase("falta una proposición")
+
+        if m := RE_IFF.search(t):
+            return Bin(IFF, self._formula(t[:m.start()]), self._formula(t[m.end():]))
+
+        if m := RE_NEG_TOTAL.match(t):
+            return Neg(self._formula(m.group(1)))
+
+        if t.startswith("si "):
+            cuerpo = t[3:]
+            if m := RE_ENTONCES.search(cuerpo):
+                ante, cons = cuerpo[:m.start()], cuerpo[m.end():]
+            elif "," in cuerpo:
+                ante, _, cons = cuerpo.partition(",")
             else:
-                self._caja(cx, y, w, txt, "#e3f4ea", VERDE, VERDE)
-            return
-        total = sum(k.total for k in n.hijos) + self.sep * (len(n.hijos) - 1)
-        x = cx - total / 2
-        for k in n.hijos:
-            self._nodo(k, x + k.total / 2, y, previo)
-            x += k.total + self.sep
+                raise ErrorFrase(f"«{t}»: falta «entonces»")
+            return Bin(IMP, self._formula(ante), self._formula(cons))
+
+        if m := RE_SOLO_SI.search(t):
+            return Bin(IMP, self._formula(t[:m.start()]), self._formula(t[m.end():]))
+
+        if m := RE_SI_POSPUESTO.search(t):          # «A si B»  =  B → A
+            return Bin(IMP, self._formula(t[m.end():]), self._formula(t[:m.start()]))
+
+        trozos = RE_DISYUNCION.split(t)
+        if len(trozos) > 1:
+            return self._plegar(O, trozos, self._formula)
+
+        trozos = RE_CONJUNCION.split(t)
+        if len(trozos) > 1:
+            return self._plegar(Y, trozos, self._formula)
+
+        if t.startswith("no "):
+            return Neg(self._formula(t[3:]))
+
+        return self._atomo(t)
+
+    def traducir(self, frase: str) -> Formula:
+        return self._formula(self._limpiar(frase))
+
+
+def separar_frases(texto: str) -> list[str]:
+    """Una regla por línea; también se separa por punto o punto y coma."""
+    return [p.strip() for p in re.split(r"[\n;]|\.(?:\s|$)", texto) if p.strip()]
+
+
+# =============================================================================
+#  3. REGLAS DE EXPANSIÓN (tabla de la clase)
+# =============================================================================
+# cada entrada: (tipo, función(a, b) → lista de ramas; cada rama = lista de fórmulas)
+_DIRECTAS = {
+    Y:   ("alfa", lambda a, b: [[a, b]]),
+    O:   ("beta", lambda a, b: [[a], [b]]),
+    IMP: ("beta", lambda a, b: [[Neg(a)], [b]]),
+    IFF: ("beta", lambda a, b: [[a, b], [Neg(a), Neg(b)]]),
+}
+_NEGADAS = {
+    Y:   ("beta", lambda a, b: [[Neg(a)], [Neg(b)]]),
+    O:   ("alfa", lambda a, b: [[Neg(a), Neg(b)]]),
+    IMP: ("alfa", lambda a, b: [[a, Neg(b)]]),
+    IFF: ("beta", lambda a, b: [[a, Neg(b)], [Neg(a), b]]),
+}
+
+
+def expandir(f: Formula) -> tuple[str, list[list[Formula]]]:
+    if isinstance(f, Bin):
+        tipo, regla = _DIRECTAS[f.op]
+        return tipo, regla(f.izq, f.der)
+    if isinstance(f, Neg):
+        g = f.sub
+        if isinstance(g, Neg):
+            return "alfa", [[g.sub]]
+        if isinstance(g, Bin):
+            tipo, regla = _NEGADAS[g.op]
+            return tipo, regla(g.izq, g.der)
+    raise ValueError(f"fórmula no expandible: {mostrar(f)}")
+
+
+def nombre_regla(f: Formula) -> str:
+    if isinstance(f, Neg):
+        return "¬" + (f.sub.op if isinstance(f.sub, Bin) else "¬")
+    return f.op
+
+
+# =============================================================================
+#  4. ÁRBOL SEMÁNTICO
+# =============================================================================
+@dataclass(eq=False)
+class Nodo:
+    ident: int
+    formula: Formula
+    etiqueta: str = ""
+    padre: Optional["Nodo"] = None
+    hijos: list["Nodo"] = field(default_factory=list)
+    paso: int = 0                    # paso en que se expandió (0 = sin expandir)
+    origen: Optional[int] = None     # nodo del que proviene
+    regla: str = ""
+    cierre: Optional[int] = None     # nodo con el que se contradice
+
+    @property
+    def cerrado(self) -> bool:
+        return self.cierre is not None
+
+
+class Arbol:
+    def __init__(self, formulas: list[Formula]) -> None:
+        self._n = 0
+        self.pasos = 0
+        self.raiz: Nodo = None  # type: ignore[assignment]
+        self.omitidas: list[str] = []
+        ultimo = None
+        for i, f in enumerate(formulas, 1):
+            ultimo = self._agregar(ultimo, f, etiqueta=f"R{i}")
+            if ultimo.cerrado:
+                self.omitidas = [f"R{j}" for j in range(i + 1, len(formulas) + 1)]
+                break
+        self._desarrollar()
+
+    # -- estructura ----------------------------------------------------------------
+    def _agregar(self, padre, f, etiqueta="", origen=None, regla="") -> Nodo:
+        self._n += 1
+        nodo = Nodo(self._n, f, etiqueta, padre, origen=origen, regla=regla)
+        if padre is None:
+            self.raiz = nodo
+        else:
+            padre.hijos.append(nodo)
+        if es_literal(f):
+            opuesta = complementaria(f)
+            for a in self.camino(padre):
+                if a.formula == opuesta:
+                    nodo.cierre = a.ident
+                    break
+        return nodo
+
+    @staticmethod
+    def camino(nodo: Optional[Nodo]) -> list[Nodo]:
+        res = []
+        while nodo is not None:
+            res.append(nodo)
+            nodo = nodo.padre
+        return res[::-1]
+
+    def recorrido(self) -> Iterator[Nodo]:
+        pila = [self.raiz]
+        while pila:
+            n = pila.pop()
+            yield n
+            pila.extend(reversed(n.hijos))
+
+    def hojas(self) -> list[Nodo]:
+        return [n for n in self.recorrido() if not n.hijos]
+
+    def ramas_abiertas(self) -> list[Nodo]:
+        return [h for h in self.hojas() if not h.cerrado]
+
+    @staticmethod
+    def hojas_abiertas_bajo(nodo: Nodo) -> list[Nodo]:
+        res, pila = [], [nodo]
+        while pila:
+            n = pila.pop()
+            if n.hijos:
+                pila.extend(reversed(n.hijos))
+            elif not n.cerrado:
+                res.append(n)
+        return res
+
+    # -- construcción -------------------------------------------------------------
+    def _siguiente(self) -> Optional[Nodo]:
+        """Fórmula pendiente: primero las de una sola rama, luego las que bifurcan."""
+        beta = None
+        for n in self.recorrido():
+            if n.paso or es_literal(n.formula) or not self.hojas_abiertas_bajo(n):
+                continue
+            if expandir(n.formula)[0] == "alfa":
+                return n
+            if beta is None:
+                beta = n
+        return beta
+
+    def _pegar(self, hoja, formulas, origen: Nodo, sin_repetir: bool) -> None:
+        actual = hoja
+        presentes = {a.formula for a in self.camino(hoja)} if sin_repetir else set()
+        for f in formulas:
+            if f in presentes:
+                continue
+            actual = self._agregar(actual, f, origen=origen.ident,
+                                   regla=nombre_regla(origen.formula))
+            presentes.add(f)
+            if actual.cerrado:
+                break
+
+    def _desarrollar(self) -> None:
+        while (nodo := self._siguiente()) is not None:
+            tipo, ramas = expandir(nodo.formula)
+            self.pasos += 1
+            nodo.paso = self.pasos
+            for hoja in self.hojas_abiertas_bajo(nodo):   # en TODAS las ramas de abajo
+                for rama in ramas:
+                    self._pegar(hoja, rama, nodo, tipo == "alfa")
+
+    # -- resultados -----------------------------------------------------------------
+    def modelo(self, hoja: Nodo) -> dict[str, bool]:
+        m: dict[str, bool] = {}
+        for n in self.camino(hoja):
+            f = n.formula
+            if isinstance(f, Atom):
+                m[f.nombre] = True
+            elif isinstance(f, Neg) and isinstance(f.sub, Atom):
+                m[f.sub.nombre] = False
+        return m
+
+
+# =============================================================================
+#  5. ANÁLISIS COMPLETO Y REPORTE
+# =============================================================================
+@dataclass
+class Resultado:
+    frases: list[str]
+    formulas: list[Formula]
+    atomos: dict[str, str]
+    arbol: Arbol
+
+    @property
+    def consistente(self) -> bool:
+        return bool(self.arbol.ramas_abiertas())
+
+
+def analizar(texto: str) -> Resultado:
+    frases = separar_frases(texto)
+    if not frases:
+        raise ErrorFrase("No se escribió ninguna regla.")
+    tr = Traductor()
+    formulas = []
+    for i, fr in enumerate(frases, 1):
+        try:
+            formulas.append(tr.traducir(fr))
+        except ErrorFrase as e:
+            raise ErrorFrase(f"Regla {i} («{fr}»): {e}") from None
+    return Resultado(frases, formulas, tr.atomos, Arbol(formulas))
+
+
+def texto_atomos(res: Resultado) -> list[str]:
+    return [f"  {l} = {t}" for l, t in res.atomos.items()]
+
+
+def texto_formulas(res: Resultado) -> list[str]:
+    return [f"  R{i}: {mostrar(f):<22} ←  {fr}"
+            for i, (fr, f) in enumerate(zip(res.frases, res.formulas), 1)]
+
+
+def _etiqueta_nodo(n: Nodo) -> str:
+    s = f"[{n.ident}] " + (f"{n.etiqueta}: " if n.etiqueta else "") + mostrar(n.formula)
+    if n.paso:
+        s += f" ✓{n.paso}"
+    if n.origen:
+        s += f"   ← [{n.origen}] {n.regla}"
+    if n.cerrado:
+        s += f"   ✕ contradice [{n.cierre}]"
+    elif not n.hijos:
+        s += "   ◯ abierta"
+    return s
+
+
+def texto_arbol(res: Resultado) -> list[str]:
+    salida: list[str] = []
+
+    def rec(n: Nodo, prefijo: str, es_ultimo: bool, es_raiz: bool) -> None:
+        marca = "" if es_raiz else ("└─ " if es_ultimo else "├─ ")
+        salida.append(prefijo + marca + _etiqueta_nodo(n))
+        sig = prefijo if es_raiz else prefijo + ("   " if es_ultimo else "│  ")
+        for i, h in enumerate(n.hijos):
+            # un solo hijo: se queda en la misma columna (rama sin bifurcar)
+            if len(n.hijos) == 1:
+                rec(h, sig, True, False)
+            else:
+                rec(h, sig, i == len(n.hijos) - 1, False)
+
+    rec(res.arbol.raiz, "  ", True, True)
+    if res.arbol.omitidas:
+        salida.append(f"  (el tronco se cerró antes: no se usaron {', '.join(res.arbol.omitidas)})")
+    return salida
+
+
+def texto_reporte(res: Resultado) -> list[str]:
+    hojas = res.arbol.hojas()
+    abiertas = res.arbol.ramas_abiertas()
+    out = [f"Ramas: {len(hojas)}  (✕ cerradas: {len(hojas) - len(abiertas)}, "
+           f"◯ abiertas: {len(abiertas)})", ""]
+    if not abiertas:
+        out.append("RESULTADO: todas las ramas se cierran → la base de conocimiento es "
+                   "INCONSISTENTE.")
+        out.append("No existe ninguna situación en la que todas las reglas sean verdaderas.")
+        return out
+    out.append("RESULTADO: la base de conocimiento es CONSISTENTE.")
+    out.append("Todas las reglas son verdaderas al mismo tiempo cuando:")
+    for i, h in enumerate(abiertas, 1):
+        m = res.arbol.modelo(h)
+        out.append("")
+        out.append(f"  Modelo {i}:")
+        for letra, texto in res.atomos.items():
+            if letra in m:
+                out.append(f"     {letra} = {'V' if m[letra] else 'F'}   «{texto}» "
+                           f"{'es verdadero' if m[letra] else 'es falso'}")
+            else:
+                out.append(f"     {letra} = V o F (indistinto)   «{texto}»")
+    return out
+
+
+def reporte_completo(res: Resultado) -> str:
+    bloques = ["=== ÁTOMOS ===", *texto_atomos(res), "",
+               "=== REGLAS COMO FÓRMULAS ===", *texto_formulas(res), "",
+               "=== ÁRBOL SEMÁNTICO (todas las reglas se suponen verdaderas) ===",
+               *texto_arbol(res), "",
+               "=== REPORTE ===", *texto_reporte(res)]
+    return "\n".join(bloques)
+
+
+# =============================================================================
+#  6. DISTRIBUCIÓN DEL ÁRBOL PARA DIBUJARLO
+# =============================================================================
+def disponer(arbol: Arbol) -> tuple[dict[int, tuple[float, int]], int, int]:
+    """Devuelve ({ident: (columna, nivel)}, nº de columnas, nº de niveles)."""
+    pos: dict[int, tuple[float, int]] = {}
+    siguiente = [0]
+
+    def rec(n: Nodo, nivel: int) -> float:
+        if not n.hijos:
+            x = float(siguiente[0])
+            siguiente[0] += 1
+        else:
+            xs = [rec(h, nivel + 1) for h in n.hijos]
+            x = (xs[0] + xs[-1]) / 2
+        pos[n.ident] = (x, nivel)
+        return x
+
+    rec(arbol.raiz, 0)
+    niveles = max(nivel for _, nivel in pos.values()) + 1
+    return pos, siguiente[0], niveles
+
+
+# =============================================================================
+#  7. INTERFAZ GRÁFICA (Tkinter)
+# =============================================================================
+EJEMPLO = ("Si es de día, entonces voy a trabajar\n"
+           "Si llueve, entonces no voy a trabajar\n"
+           "Es de día")
+
+
+def lanzar_gui(texto_inicial: str = "") -> None:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+    class App(tk.Tk):
+        ANCHO_CHAR, ALTO_CAJA, SEP_NIVEL, MARGEN = 7, 58, 90, 24
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.title("Sistema experto · Árboles semánticos")
+            self.geometry("1100x760")
+            self.minsize(800, 520)
+            self.resultado: Optional[Resultado] = None
+            self._construir_ui()
+            if texto_inicial:
+                self.entrada.insert("1.0", texto_inicial)
+                self.analizar()
+
+        # -- interfaz ------------------------------------------------------------
+        def _construir_ui(self) -> None:
+            marco = ttk.Frame(self, padding=8)
+            marco.pack(fill="both", expand=True)
+
+            ttk.Label(marco, text="Reglas y hechos en español (uno por línea):",
+                      font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+            self.entrada = scrolledtext.ScrolledText(marco, height=7, font=("TkDefaultFont", 11))
+            self.entrada.pack(fill="x", pady=(2, 6))
+
+            botones = ttk.Frame(marco)
+            botones.pack(fill="x", pady=(0, 6))
+            for texto, cmd in (("Analizar", self.analizar), ("Cargar ejemplo", self.cargar_ejemplo),
+                               ("Abrir archivo…", self.abrir), ("Limpiar", self.limpiar),
+                               ("Guardar reporte…", self.guardar)):
+                ttk.Button(botones, text=texto, command=cmd).pack(side="left", padx=(0, 6))
+            self.estado = ttk.Label(botones, text="", foreground="#555")
+            self.estado.pack(side="right")
+
+            self.pestañas = ttk.Notebook(marco)
+            self.pestañas.pack(fill="both", expand=True)
+
+            self.txt_atomos = self._pestaña_texto("1. Átomos y fórmulas")
+            tab_arbol = ttk.Frame(self.pestañas)
+            self.pestañas.add(tab_arbol, text="2. Árbol semántico")
+            self.lienzo = tk.Canvas(tab_arbol, bg="white", highlightthickness=0)
+            sy = ttk.Scrollbar(tab_arbol, orient="vertical", command=self.lienzo.yview)
+            sx = ttk.Scrollbar(tab_arbol, orient="horizontal", command=self.lienzo.xview)
+            self.lienzo.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+            sy.pack(side="right", fill="y")
+            sx.pack(side="bottom", fill="x")
+            self.lienzo.pack(fill="both", expand=True)
+            self.lienzo.bind("<ButtonPress-1>", lambda e: self.lienzo.scan_mark(e.x, e.y))
+            self.lienzo.bind("<B1-Motion>", lambda e: self.lienzo.scan_dragto(e.x, e.y, gain=1))
+            self.txt_reporte = self._pestaña_texto("3. Reporte")
+
+        def _pestaña_texto(self, titulo: str) -> scrolledtext.ScrolledText:
+            f = ttk.Frame(self.pestañas)
+            self.pestañas.add(f, text=titulo)
+            t = scrolledtext.ScrolledText(f, font=("Courier", 11), wrap="none")
+            t.pack(fill="both", expand=True)
+            return t
+
+        @staticmethod
+        def _poner(widget, lineas) -> None:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", "\n".join(lineas))
+            widget.configure(state="disabled")
+
+        # -- acciones -------------------------------------------------------------
+        def cargar_ejemplo(self) -> None:
+            self.limpiar()
+            self.entrada.insert("1.0", EJEMPLO)
+            self.analizar()
+
+        def limpiar(self) -> None:
+            self.entrada.delete("1.0", "end")
+
+        def abrir(self) -> None:
+            ruta = filedialog.askopenfilename(filetypes=[("Texto", "*.txt"), ("Todos", "*.*")])
+            if ruta:
+                with open(ruta, encoding="utf-8") as fh:
+                    self.limpiar()
+                    self.entrada.insert("1.0", fh.read())
+                self.analizar()
+
+        def guardar(self) -> None:
+            if not self.resultado:
+                messagebox.showinfo("Reporte", "Primero analiza unas reglas.")
+                return
+            ruta = filedialog.asksaveasfilename(defaultextension=".txt",
+                                                filetypes=[("Texto", "*.txt")])
+            if ruta:
+                with open(ruta, "w", encoding="utf-8") as fh:
+                    fh.write(reporte_completo(self.resultado))
+
+        def analizar(self) -> None:
+            try:
+                self.resultado = analizar(self.entrada.get("1.0", "end"))
+            except ErrorFrase as e:
+                messagebox.showerror("No pude interpretar el texto", str(e))
+                return
+            r = self.resultado
+            self._poner(self.txt_atomos, ["ÁTOMOS", *texto_atomos(r), "",
+                                          "REGLAS COMO FÓRMULAS", *texto_formulas(r)])
+            self._poner(self.txt_reporte, texto_reporte(r))
+            self.dibujar(r.arbol)
+            self.estado.configure(text="Consistente ✓" if r.consistente else "Inconsistente ✕",
+                                  foreground="#2e7d32" if r.consistente else "#c62828")
+            self.pestañas.select(1)
+
+        # -- dibujo ----------------------------------------------------------------
+        def _lineas_caja(self, n: Nodo) -> tuple[list[str], str, str]:
+            l1 = f"[{n.ident}] " + (f"{n.etiqueta}: " if n.etiqueta else "") + mostrar(n.formula)
+            if n.paso:
+                l1 += f"  ✓{n.paso}"
+            lineas = [l1]
+            if n.origen:
+                lineas.append(f"← [{n.origen}] {n.regla}")
+            if n.cerrado:
+                lineas.append(f"✕ contradice [{n.cierre}]")
+                return lineas, "#fde2e2", "#c62828"
+            if not n.hijos:
+                lineas.append("◯ ABIERTA")
+                return lineas, "#dff5e1", "#2e7d32"
+            return lineas, "#ffffff", "#777777"
+
+        def dibujar(self, arbol: Arbol) -> None:
+            c = self.lienzo
+            c.delete("all")
+            pos, columnas, niveles = disponer(arbol)
+            nodos = {n.ident: n for n in arbol.recorrido()}
+            cajas = {i: self._lineas_caja(n) for i, n in nodos.items()}
+            ancho_col = max(len(l) for ls, _, _ in cajas.values() for l in ls) \
+                * self.ANCHO_CHAR + 30
+            ancho_col = max(ancho_col, 170)
+
+            def centro(i: int) -> tuple[float, float]:
+                x, nivel = pos[i]
+                return (self.MARGEN + (x + 0.5) * ancho_col,
+                        self.MARGEN + nivel * self.SEP_NIVEL + self.ALTO_CAJA / 2)
+
+            for i, n in nodos.items():                       # aristas
+                x0, y0 = centro(i)
+                for h in n.hijos:
+                    x1, y1 = centro(h.ident)
+                    c.create_line(x0, y0 + self.ALTO_CAJA / 2 - 10,
+                                  x1, y1 - self.ALTO_CAJA / 2 + 10, fill="#666", width=1.4)
+
+            for i, (lineas, relleno, borde) in cajas.items():  # nodos
+                x, y = centro(i)
+                ancho = max(len(l) for l in lineas) * self.ANCHO_CHAR + 18
+                alto = 18 * len(lineas) + 10
+                c.create_rectangle(x - ancho / 2, y - alto / 2, x + ancho / 2, y + alto / 2,
+                                   fill=relleno, outline=borde, width=2)
+                c.create_text(x, y, text="\n".join(lineas), justify="center",
+                              font=("TkDefaultFont", 10))
+
+            c.configure(scrollregion=(0, 0, columnas * ancho_col + 2 * self.MARGEN,
+                                      niveles * self.SEP_NIVEL + 2 * self.MARGEN))
+
+    App().mainloop()
+
+
+# =============================================================================
+#  8. PUNTO DE ENTRADA
+# =============================================================================
+def leer_consola() -> str:
+    print("Escribe una regla o hecho por línea (línea vacía para terminar).")
+    lineas = []
+    while True:
+        try:
+            l = input(f"  Regla {len(lineas) + 1}> ")
+        except EOFError:
+            break
+        if not l.strip():
+            break
+        lineas.append(l)
+    return "\n".join(lineas)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Sistema experto: reglas en español → árbol semántico")
+    ap.add_argument("-a", "--archivo", help="archivo de texto con las reglas")
+    ap.add_argument("--demo", action="store_true", help="usa el ejemplo de la clase")
+    ap.add_argument("--cli", action="store_true", help="modo consola (sin ventana)")
+    args = ap.parse_args()
+
+    texto = ""
+    if args.demo:
+        texto = EJEMPLO
+    elif args.archivo:
+        with open(args.archivo, encoding="utf-8") as fh:
+            texto = fh.read()
+
+    if not args.cli:
+        try:
+            lanzar_gui(texto)
+            return 0
+        except Exception as e:  # sin tkinter o sin pantalla
+            print(f"(no se pudo abrir la ventana: {e}; uso el modo consola)\n")
+
+    if not texto:
+        texto = leer_consola()
+    try:
+        print(reporte_completo(analizar(texto)))
+    except ErrorFrase as e:
+        print(e)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    sys.exit(main())
