@@ -7,6 +7,10 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterator, Optional, Union
 
+# Importar Tkinter para la aplicación de escritorio
+import tkinter as tk
+from tkinter import messagebox, scrolledtext, ttk
+
 sys.setrecursionlimit(20000)
 
 # =============================================================================
@@ -91,10 +95,9 @@ class Traductor:
     """Extrae los átomos y convierte cada frase en una fórmula."""
 
     def __init__(self) -> None:
-        self._por_clave: dict[str, str] = {}   # frase normalizada → letra
-        self.atomos: dict[str, str] = {}       # letra → frase original
+        self._por_clave: dict[str, str] = {}
+        self.atomos: dict[str, str] = {}
 
-    # -- preparación del texto -------------------------------------------------
     @staticmethod
     def _limpiar(frase: str) -> str:
         t = unicodedata.normalize("NFC", frase).lower().replace("sólo", "solo")
@@ -104,7 +107,6 @@ class Traductor:
     def _letra(self, n: int) -> str:
         return LETRAS[n] if n < len(LETRAS) else f"P{n - len(LETRAS) + 1}"
 
-    # -- átomos ---------------------------------------------------------------
     def _atomo(self, t: str) -> Atom:
         t = RE_PREFIJO_ATOMO.sub("", t)
         t = re.sub(r"\s+", " ", t.replace(",", " ")).strip()
@@ -117,7 +119,6 @@ class Traductor:
             self.atomos[letra] = t
         return Atom(self._por_clave[clave])
 
-    # -- conectores (de menor a mayor precedencia) ------------------------------
     @staticmethod
     def _plegar(op: str, trozos: list, f) -> Formula:
         res = f(trozos[0])
@@ -132,10 +133,8 @@ class Traductor:
 
         if m := RE_IFF.search(t):
             return Bin(IFF, self._formula(t[:m.start()]), self._formula(t[m.end():]))
-
         if m := RE_NEG_TOTAL.match(t):
             return Neg(self._formula(m.group(1)))
-
         if t.startswith("si "):
             cuerpo = t[3:]
             if m := RE_ENTONCES.search(cuerpo):
@@ -145,21 +144,17 @@ class Traductor:
             else:
                 raise ErrorFrase(f"«{t}»: falta «entonces»")
             return Bin(IMP, self._formula(ante), self._formula(cons))
-
         if m := RE_SOLO_SI.search(t):
             return Bin(IMP, self._formula(t[:m.start()]), self._formula(t[m.end():]))
-
-        if m := RE_SI_POSPUESTO.search(t):          # «A si B»  =  B → A
+        if m := RE_SI_POSPUESTO.search(t):
             return Bin(IMP, self._formula(t[m.end():]), self._formula(t[:m.start()]))
 
         trozos = RE_DISYUNCION.split(t)
         if len(trozos) > 1:
             return self._plegar(O, trozos, self._formula)
-
         trozos = RE_CONJUNCION.split(t)
         if len(trozos) > 1:
             return self._plegar(Y, trozos, self._formula)
-
         if t.startswith("no "):
             return Neg(self._formula(t[3:]))
 
@@ -170,14 +165,12 @@ class Traductor:
 
 
 def separar_frases(texto: str) -> list[str]:
-    """Una regla por línea; también se separa por punto o punto y coma."""
     return [p.strip() for p in re.split(r"[\n;]|\.(?:\s|$)", texto) if p.strip()]
 
 
 # =============================================================================
-#  3. REGLAS DE EXPANSIÓN (tabla de la clase)
+#  3. REGLAS DE EXPANSIÓN
 # =============================================================================
-# cada entrada: (tipo, función(a, b) → lista de ramas; cada rama = lista de fórmulas)
 _DIRECTAS = {
     Y:   ("alfa", lambda a, b: [[a, b]]),
     O:   ("beta", lambda a, b: [[a], [b]]),
@@ -222,10 +215,10 @@ class Nodo:
     etiqueta: str = ""
     padre: Optional["Nodo"] = None
     hijos: list["Nodo"] = field(default_factory=list)
-    paso: int = 0                    # paso en que se expandió (0 = sin expandir)
-    origen: Optional[int] = None     # nodo del que proviene
+    paso: int = 0
+    origen: Optional[int] = None
     regla: str = ""
-    cierre: Optional[int] = None     # nodo con el que se contradice
+    cierre: Optional[int] = None
 
     @property
     def cerrado(self) -> bool:
@@ -246,7 +239,6 @@ class Arbol:
                 break
         self._desarrollar()
 
-    # -- estructura ----------------------------------------------------------------
     def _agregar(self, padre, f, etiqueta="", origen=None, regla="") -> Nodo:
         self._n += 1
         nodo = Nodo(self._n, f, etiqueta, padre, origen=origen, regla=regla)
@@ -294,9 +286,7 @@ class Arbol:
                 res.append(n)
         return res
 
-    # -- construcción -------------------------------------------------------------
     def _siguiente(self) -> Optional[Nodo]:
-        """Fórmula pendiente: primero las de una sola rama, luego las que bifurcan."""
         beta = None
         for n in self.recorrido():
             if n.paso or es_literal(n.formula) or not self.hojas_abiertas_bajo(n):
@@ -324,11 +314,10 @@ class Arbol:
             tipo, ramas = expandir(nodo.formula)
             self.pasos += 1
             nodo.paso = self.pasos
-            for hoja in self.hojas_abiertas_bajo(nodo):   # en TODAS las ramas de abajo
+            for hoja in self.hojas_abiertas_bajo(nodo):
                 for rama in ramas:
                     self._pegar(hoja, rama, nodo, tipo == "alfa")
 
-    # -- resultados -----------------------------------------------------------------
     def modelo(self, hoja: Nodo) -> dict[str, bool]:
         m: dict[str, bool] = {}
         for n in self.camino(hoja):
@@ -341,7 +330,7 @@ class Arbol:
 
 
 # =============================================================================
-#  5. ANÁLISIS COMPLETO Y REPORTE
+#  5. ANÁLISIS Y REPORTE
 # =============================================================================
 @dataclass
 class Resultado:
@@ -361,11 +350,8 @@ def analizar(texto: str) -> Resultado:
         raise ErrorFrase("No se escribió ninguna regla.")
     tr = Traductor()
     formulas = []
-    for i, fr in enumerate(frases, 1):
-        try:
-            formulas.append(tr.traducir(fr))
-        except ErrorFrase as e:
-            raise ErrorFrase(f"Regla {i} («{fr}»): {e}") from None
+    for fr in frases:
+        formulas.append(tr.traducir(fr))
     return Resultado(frases, formulas, tr.atomos, Arbol(formulas))
 
 
@@ -378,48 +364,13 @@ def texto_formulas(res: Resultado) -> list[str]:
             for i, (fr, f) in enumerate(zip(res.frases, res.formulas), 1)]
 
 
-def _etiqueta_nodo(n: Nodo) -> str:
-    s = f"[{n.ident}] " + (f"{n.etiqueta}: " if n.etiqueta else "") + mostrar(n.formula)
-    if n.paso:
-        s += f" ✓{n.paso}"
-    if n.origen:
-        s += f"   ← [{n.origen}] {n.regla}"
-    if n.cerrado:
-        s += f"   ✕ contradice [{n.cierre}]"
-    elif not n.hijos:
-        s += "   ◯ abierta"
-    return s
-
-
-def texto_arbol(res: Resultado) -> list[str]:
-    salida: list[str] = []
-
-    def rec(n: Nodo, prefijo: str, es_ultimo: bool, es_raiz: bool) -> None:
-        marca = "" if es_raiz else ("└─ " if es_ultimo else "├─ ")
-        salida.append(prefijo + marca + _etiqueta_nodo(n))
-        sig = prefijo if es_raiz else prefijo + ("   " if es_ultimo else "│  ")
-        for i, h in enumerate(n.hijos):
-            # un solo hijo: se queda en la misma columna (rama sin bifurcar)
-            if len(n.hijos) == 1:
-                rec(h, sig, True, False)
-            else:
-                rec(h, sig, i == len(n.hijos) - 1, False)
-
-    rec(res.arbol.raiz, "  ", True, True)
-    if res.arbol.omitidas:
-        salida.append(f"  (el tronco se cerró antes: no se usaron {', '.join(res.arbol.omitidas)})")
-    return salida
-
-
 def texto_reporte(res: Resultado) -> list[str]:
     hojas = res.arbol.hojas()
     abiertas = res.arbol.ramas_abiertas()
     out = [f"Ramas: {len(hojas)}  (✕ cerradas: {len(hojas) - len(abiertas)}, "
            f"◯ abiertas: {len(abiertas)})", ""]
     if not abiertas:
-        out.append("RESULTADO: todas las ramas se cierran → la base de conocimiento es "
-                   "INCONSISTENTE.")
-        out.append("No existe ninguna situación en la que todas las reglas sean verdaderas.")
+        out.append("RESULTADO: todas las ramas se cierran → la base de conocimiento es INCONSISTENTE.")
         return out
     out.append("RESULTADO: la base de conocimiento es CONSISTENTE.")
     out.append("Todas las reglas son verdaderas al mismo tiempo cuando:")
@@ -429,27 +380,24 @@ def texto_reporte(res: Resultado) -> list[str]:
         out.append(f"  Modelo {i}:")
         for letra, texto in res.atomos.items():
             if letra in m:
-                out.append(f"     {letra} = {'V' if m[letra] else 'F'}   «{texto}» "
+                out.append(f"     {letra} = {'V' if m[letra] else 'F'}    «{texto}» "
                            f"{'es verdadero' if m[letra] else 'es falso'}")
             else:
-                out.append(f"     {letra} = V o F (indistinto)   «{texto}»")
+                out.append(f"     {letra} = V o F (indistinto)    «{texto}»")
     return out
 
 
 def reporte_completo(res: Resultado) -> str:
     bloques = ["=== ÁTOMOS ===", *texto_atomos(res), "",
                "=== REGLAS COMO FÓRMULAS ===", *texto_formulas(res), "",
-               "=== ÁRBOL SEMÁNTICO (todas las reglas se suponen verdaderas) ===",
-               *texto_arbol(res), "",
                "=== REPORTE ===", *texto_reporte(res)]
     return "\n".join(bloques)
 
 
 # =============================================================================
-#  6. DISTRIBUCIÓN DEL ÁRBOL PARA DIBUJARLO
+#  6. DISTRIBUCIÓN DEL ÁRBOL PARA DIBUJAR
 # =============================================================================
 def disponer(arbol: Arbol) -> tuple[dict[int, tuple[float, int]], int, int]:
-    """Devuelve ({ident: (columna, nivel)}, nº de columnas, nº de niveles)."""
     pos: dict[int, tuple[float, int]] = {}
     siguiente = [0]
 
@@ -469,56 +417,53 @@ def disponer(arbol: Arbol) -> tuple[dict[int, tuple[float, int]], int, int]:
 
 
 # =============================================================================
-#  7. INTERFAZ GRÁFICA (Tkinter)
+#  7. INTERFAZ GRÁFICA DE ESCRITORIO (Tkinter)
 # =============================================================================
 EJEMPLO = ("Si es de día, entonces voy a trabajar\n"
            "Si llueve, entonces no voy a trabajar\n"
            "Es de día")
 
 
-def lanzar_gui(texto_inicial: str = "") -> None:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, scrolledtext, ttk
-
+def lanzar_gui() -> None:
     class App(tk.Tk):
-        ANCHO_CHAR, ALTO_CAJA, SEP_NIVEL, MARGEN = 7, 58, 90, 24
+        ANCHO_CHAR, ALTO_CAJA, SEP_NIVEL, MARGEN = 7, 65, 100, 30
 
         def __init__(self) -> None:
             super().__init__()
-            self.title("Sistema experto · Árboles semánticos")
-            self.geometry("1100x760")
-            self.minsize(800, 520)
+            self.title("Simulador de Tableros Semánticos · Visual Studio")
+            self.geometry("1150x800")
             self.resultado: Optional[Resultado] = None
             self._construir_ui()
-            if texto_inicial:
-                self.entrada.insert("1.0", texto_inicial)
-                self.analizar()
+            # Cargar ejemplo por defecto al iniciar
+            self.entrada.insert("1.0", EJEMPLO)
+            self.analizar()
 
-        # -- interfaz ------------------------------------------------------------
         def _construir_ui(self) -> None:
-            marco = ttk.Frame(self, padding=8)
+            marco = ttk.Frame(self, padding=10)
             marco.pack(fill="both", expand=True)
 
-            ttk.Label(marco, text="Reglas y hechos en español (uno por línea):",
+            ttk.Label(marco, text="Escribe tus reglas o hechos en español (uno por línea o separados por punto):",
                       font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
-            self.entrada = scrolledtext.ScrolledText(marco, height=7, font=("TkDefaultFont", 11))
-            self.entrada.pack(fill="x", pady=(2, 6))
+            
+            self.entrada = scrolledtext.ScrolledText(marco, height=6, font=("TkDefaultFont", 11))
+            self.entrada.pack(fill="x", pady=(4, 8))
 
             botones = ttk.Frame(marco)
-            botones.pack(fill="x", pady=(0, 6))
-            for texto, cmd in (("Analizar", self.analizar), ("Cargar ejemplo", self.cargar_ejemplo),
-                               ("Abrir archivo…", self.abrir), ("Limpiar", self.limpiar),
-                               ("Guardar reporte…", self.guardar)):
-                ttk.Button(botones, text=texto, command=cmd).pack(side="left", padx=(0, 6))
-            self.estado = ttk.Label(botones, text="", foreground="#555")
+            botones.pack(fill="x", pady=(0, 8))
+            
+            ttk.Button(botones, text="Analizar y Dibujar", command=self.analizar).pack(side="left", padx=(0, 6))
+            ttk.Button(botones, text="Limpiar / Nueva Frase", command=self.limpiar).pack(side="left", padx=(0, 6))
+            ttk.Button(botones, text="Cargar Ejemplo", command=self.cargar_ejemplo).pack(side="left", padx=(0, 6))
+            
+            self.estado = ttk.Label(botones, text="", font=("TkDefaultFont", 10, "bold"))
             self.estado.pack(side="right")
 
             self.pestañas = ttk.Notebook(marco)
             self.pestañas.pack(fill="both", expand=True)
 
-            self.txt_atomos = self._pestaña_texto("1. Átomos y fórmulas")
+            # Pestaña 1: Árbol Visual Interactivo
             tab_arbol = ttk.Frame(self.pestañas)
-            self.pestañas.add(tab_arbol, text="2. Árbol semántico")
+            self.pestañas.add(tab_arbol, text="1. Árbol Semántico (Gráfico)")
             self.lienzo = tk.Canvas(tab_arbol, bg="white", highlightthickness=0)
             sy = ttk.Scrollbar(tab_arbol, orient="vertical", command=self.lienzo.yview)
             sx = ttk.Scrollbar(tab_arbol, orient="horizontal", command=self.lienzo.xview)
@@ -526,9 +471,13 @@ def lanzar_gui(texto_inicial: str = "") -> None:
             sy.pack(side="right", fill="y")
             sx.pack(side="bottom", fill="x")
             self.lienzo.pack(fill="both", expand=True)
+            
+            # Permitir arrastrar el lienzo con el mouse
             self.lienzo.bind("<ButtonPress-1>", lambda e: self.lienzo.scan_mark(e.x, e.y))
             self.lienzo.bind("<B1-Motion>", lambda e: self.lienzo.scan_dragto(e.x, e.y, gain=1))
-            self.txt_reporte = self._pestaña_texto("3. Reporte")
+
+            # Pestaña 2: Reporte detallado en texto
+            self.txt_reporte = self._pestaña_texto("2. Reporte y Modelos Detallados")
 
         def _pestaña_texto(self, titulo: str) -> scrolledtext.ScrolledText:
             f = ttk.Frame(self.pestañas)
@@ -544,49 +493,36 @@ def lanzar_gui(texto_inicial: str = "") -> None:
             widget.insert("1.0", "\n".join(lineas))
             widget.configure(state="disabled")
 
-        # -- acciones -------------------------------------------------------------
         def cargar_ejemplo(self) -> None:
-            self.limpiar()
+            self.entrada.delete("1.0", "end")
             self.entrada.insert("1.0", EJEMPLO)
             self.analizar()
 
         def limpiar(self) -> None:
             self.entrada.delete("1.0", "end")
-
-        def abrir(self) -> None:
-            ruta = filedialog.askopenfilename(filetypes=[("Texto", "*.txt"), ("Todos", "*.*")])
-            if ruta:
-                with open(ruta, encoding="utf-8") as fh:
-                    self.limpiar()
-                    self.entrada.insert("1.0", fh.read())
-                self.analizar()
-
-        def guardar(self) -> None:
-            if not self.resultado:
-                messagebox.showinfo("Reporte", "Primero analiza unas reglas.")
-                return
-            ruta = filedialog.asksaveasfilename(defaultextension=".txt",
-                                                filetypes=[("Texto", "*.txt")])
-            if ruta:
-                with open(ruta, "w", encoding="utf-8") as fh:
-                    fh.write(reporte_completo(self.resultado))
+            self.lienzo.delete("all")
+            self._poner(self.txt_reporte, ["Escribe tus reglas arriba y presiona 'Analizar y Dibujar'."])
+            self.estado.configure(text="")
 
         def analizar(self) -> None:
+            texto = self.entrada.get("1.0", "end")
             try:
-                self.resultado = analizar(self.entrada.get("1.0", "end"))
+                self.resultado = analizar(texto)
             except ErrorFrase as e:
-                messagebox.showerror("No pude interpretar el texto", str(e))
+                messagebox.showerror("Error de interpretación", str(e))
                 return
+            
             r = self.resultado
-            self._poner(self.txt_atomos, ["ÁTOMOS", *texto_atomos(r), "",
-                                          "REGLAS COMO FÓRMULAS", *texto_formulas(r)])
-            self._poner(self.txt_reporte, texto_reporte(r))
-            self.dibujar(r.arbol)
-            self.estado.configure(text="Consistente ✓" if r.consistente else "Inconsistente ✕",
-                                  foreground="#2e7d32" if r.consistente else "#c62828")
-            self.pestañas.select(1)
+            self._poner(self.txt_reporte, [reporte_completo(r)])
+            self.dibujar_arbol(r.arbol)
+            
+            if r.consistente:
+                self.estado.configure(text="Base CONSISTENTE ✓", foreground="#2e7d32")
+            else:
+                self.estado.configure(text="Base INCONSISTENTE ✕", foreground="#c62828")
+            
+            self.pestañas.select(0)
 
-        # -- dibujo ----------------------------------------------------------------
         def _lineas_caja(self, n: Nodo) -> tuple[list[str], str, str]:
             l1 = f"[{n.ident}] " + (f"{n.etiqueta}: " if n.etiqueta else "") + mostrar(n.formula)
             if n.paso:
@@ -602,87 +538,73 @@ def lanzar_gui(texto_inicial: str = "") -> None:
                 return lineas, "#dff5e1", "#2e7d32"
             return lineas, "#ffffff", "#777777"
 
-        def dibujar(self, arbol: Arbol) -> None:
+        def dibujar_arbol(self, arbol: Arbol) -> None:
             c = self.lienzo
             c.delete("all")
             pos, columnas, niveles = disponer(arbol)
             nodos = {n.ident: n for n in arbol.recorrido()}
             cajas = {i: self._lineas_caja(n) for i, n in nodos.items()}
-            ancho_col = max(len(l) for ls, _, _ in cajas.values() for l in ls) \
-                * self.ANCHO_CHAR + 30
-            ancho_col = max(ancho_col, 170)
+            
+            ancho_col = max(len(l) for ls, _, _ in cajas.values() for l in ls) * self.ANCHO_CHAR + 30
+            ancho_col = max(ancho_col, 180)
 
             def centro(i: int) -> tuple[float, float]:
                 x, nivel = pos[i]
                 return (self.MARGEN + (x + 0.5) * ancho_col,
                         self.MARGEN + nivel * self.SEP_NIVEL + self.ALTO_CAJA / 2)
 
-            for i, n in nodos.items():                       # aristas
+            # Dibujar líneas (aristas)
+            for i, n in nodos.items():
                 x0, y0 = centro(i)
                 for h in n.hijos:
                     x1, y1 = centro(h.ident)
-                    c.create_line(x0, y0 + self.ALTO_CAJA / 2 - 10,
-                                  x1, y1 - self.ALTO_CAJA / 2 + 10, fill="#666", width=1.4)
+                    c.create_line(x0, y0 + self.ALTO_CAJA / 2 - 5,
+                                  x1, y1 - self.ALTO_CAJA / 2 + 5, fill="#555", width=1.8)
 
-            for i, (lineas, relleno, borde) in cajas.items():  # nodos
+            # Dibujar cajas de nodos
+            for i, (lineas, relleno, borde) in cajas.items():
                 x, y = centro(i)
-                ancho = max(len(l) for l in lineas) * self.ANCHO_CHAR + 18
-                alto = 18 * len(lineas) + 10
+                ancho = max(len(l) for l in lineas) * self.ANCHO_CHAR + 16
+                alto = 18 * len(lineas) + 12
                 c.create_rectangle(x - ancho / 2, y - alto / 2, x + ancho / 2, y + alto / 2,
                                    fill=relleno, outline=borde, width=2)
                 c.create_text(x, y, text="\n".join(lineas), justify="center",
-                              font=("TkDefaultFont", 10))
+                              font=("TkDefaultFont", 10, "bold"))
 
             c.configure(scrollregion=(0, 0, columnas * ancho_col + 2 * self.MARGEN,
-                                      niveles * self.SEP_NIVEL + 2 * self.MARGEN))
+                                     niveles * self.SEP_NIVEL + 2 * self.MARGEN))
 
     App().mainloop()
 
 
-# =============================================================================
-#  8. PUNTO DE ENTRADA
-# =============================================================================
-def leer_consola() -> str:
-    print("Escribe una regla o hecho por línea (línea vacía para terminar).")
-    lineas = []
-    while True:
-        try:
-            l = input(f"  Regla {len(lineas) + 1}> ")
-        except EOFError:
-            break
-        if not l.strip():
-            break
-        lineas.append(l)
-    return "\n".join(lineas)
-
-
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Sistema experto: reglas en español → árbol semántico")
-    ap.add_argument("-a", "--archivo", help="archivo de texto con las reglas")
-    ap.add_argument("--demo", action="store_true", help="usa el ejemplo de la clase")
-    ap.add_argument("--cli", action="store_true", help="modo consola (sin ventana)")
+    ap = argparse.ArgumentParser(description="Simulador de Tableros Semánticos")
+    ap.add_argument("--cli", action="store_true", help="Ejecutar en modo consola de texto")
     args = ap.parse_args()
 
-    texto = ""
-    if args.demo:
-        texto = EJEMPLO
-    elif args.archivo:
-        with open(args.archivo, encoding="utf-8") as fh:
-            texto = fh.read()
-
-    if not args.cli:
+    if args.cli:
+        print("Modo consola activo. Escribe tus reglas (Enter vacío para terminar):")
+        lineas = []
+        while True:
+            try:
+                l = input(f"  Regla {len(lineas) + 1}> ")
+            except EOFError:
+                break
+            if not l.strip():
+                break
+            lineas.append(l)
         try:
-            lanzar_gui(texto)
-            return 0
-        except Exception as e:  # sin tkinter o sin pantalla
-            print(f"(no se pudo abrir la ventana: {e}; uso el modo consola)\n")
+            print(reporte_completo(analizar("\n".join(lineas))))
+        except ErrorFrase as e:
+            print(f"Error: {e}")
+            return 1
+        return 0
 
-    if not texto:
-        texto = leer_consola()
+    # Por defecto abre la aplicación gráfica de escritorio
     try:
-        print(reporte_completo(analizar(texto)))
-    except ErrorFrase as e:
-        print(e)
+        lanzar_gui()
+    except Exception as e:
+        print(f"No se pudo abrir la interfaz gráfica: {e}")
         return 1
     return 0
 
